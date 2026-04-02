@@ -1,30 +1,56 @@
-> Note: The original unmodified leaked source is preserved in the backup branch.
+# Enterprise AI Security Research: Dissecting Claude Code Architecture
 
-# Claude Code - Leaked Source (2026-03-31)
+As a **Cyber Security Engineer**, my primary objective with this repository is to analyze the underlying architecture of modern, highly-privileged AI agents. This research focuses on securing chatbot environments, comprehensively understanding "jailbreak" mechanics (direct and indirect prompt injections), and evaluating how enterprise AI solutions isolate sensitive host data. 
 
-On March 31, 2026, the full source code of Anthropic's Claude Code CLI was leaked via a `.map` file exposed in their npm registry.
+By deconstructing the tool execution pipelines, access permissions, and integration layers, this repository serves to identify potential attack vectors—such as Remote Code Execution (RCE), Server-Side Request Forgery (SSRF), and malicious sub-agent protocols—bridging the gap between theoretical AI security and practical production implementations.
 
-## How It Leaked
+## Threat Model & Attack Surface Diagram
 
-Chaofan Shou (@Fried_rice) discovered the leak and posted it publicly:
+Below is the architectured threat model visualizing the isolation between the Core AI Engine and the Tool Execution Layer, mapping out critical vulnerabilities.
 
-"Claude code source code has been leaked via a map file in their npm registry!"
+![Threat Model Diagram](https://res.cloudinary.com/dxtwhas7n/image/upload/f_auto,q_auto/mermaid-diagram_tye6xk)
 
-- @Fried_rice, March 31, 2026
+<details>
+<summary>View Mermaid Source</summary>
 
-The source map file in the published npm package contained a reference to the full, unobfuscated TypeScript source, which was downloadable as a zip archive from Anthropic's R2 storage bucket.
+```mermaid
+graph TD
+    User([User CLI / IDE]) --> |Inputs / Tool Auth| CLI[Command System: src/commands/]
+    
+    subgraph "Core AI Engine"
+        CLI --> QE[QueryEngine.ts]
+        QE --> |Context Gathering| Ctx[context.ts]
+        Ctx --> |Parses Context| Model((Anthropic Claude API))
+    end
+    
+    subgraph "Execution  (Attack Surface)"
+        Model --> |Requests Tool Execution| Tools[Tools Registry: src/tools/]
+        Tools --> PT[Permission Hooks: src/hooks/toolPermission/]
+        PT --> |Allowed| T_Bash[BashTool]
+        PT --> |Allowed| T_File[FileWriteTool]
+        PT --> |Allowed| T_MCP[MCPTool]
+        PT --> |Allowed| T_Web[WebFetchTool]
+    end
+    
+    T_Bash --> |RCE Risk| OS[Local OS]
+    T_File --> |Malicious Mod Risk| Files[File System]
+    T_Web --> |SSRF Risk| Network[External Web]
+    
+    User -.-x |Threat Vector: Direct Prompt Injection| Ctx
+    T_Web -.-x |Threat Vector: Indirect Prompt Injection| Ctx
+    T_MCP -.-x |Threat Vector: Toxic Sub-Agent Protocol| Ctx
+```
+</details>
 
-## Overview
+## Technical Overview & Context
 
-Claude Code is Anthropic's official CLI tool that lets you interact with Claude directly from the terminal to perform software engineering tasks - editing files, running commands, searching codebases, managing git workflows, and more.
+This codebase represents the real-world architecture of Anthropic's Claude Code CLI. Claude Code is a terminal-native tool designed for complex software engineering tasks. Analyzing this code provides a rare, massive-scale environment for security audits and vulnerability research.
 
-This repository contains the leaked `src/` directory.
-
-- Leaked on: 2026-03-31
-- Language: TypeScript
-- Runtime: Bun
-- Terminal UI: React + Ink (React for CLI)
-- Scale: ~1,900 files, 512,000+ lines of code
+- **Incident Context**: The initial code was obtained via an npm `.map` file leakage (discovered on 2026-03-31).
+- **Language**: TypeScript
+- **Runtime**: Bun
+- **Terminal UI**: React + Ink
+- **Scale**: ~1,900 files, 512,000+ lines of code
 
 ## Directory Structure
 
@@ -161,20 +187,6 @@ A bidirectional communication layer connecting IDE extensions (VS Code, JetBrain
 
 Checks permissions on every tool invocation. Either prompts the user for approval/denial or automatically resolves based on the configured permission mode (default, plan, bypassPermissions, auto, etc.).
 
-### 6. Feature Flags
-
-Dead code elimination via Bun's `bun:bundle` feature flags:
-
-```typescript
-import { feature } from 'bun:bundle'
-
-// Inactive code is completely stripped at build time
-const voiceCommand = feature('VOICE_MODE')
-  ? require('./commands/voice/index.js').default
-  : null
-```
-
-Notable flags: PROACTIVE, KAIROS, BRIDGE_MODE, DAEMON, VOICE_MODE, AGENT_TRIGGERS, MONITOR_TOOL
 
 ## Key Files in Detail
 
@@ -209,135 +221,6 @@ Commander.js-based CLI parser + React/Ink renderer initialization. At startup, p
 | Telemetry | OpenTelemetry + gRPC |
 | Feature Flags | GrowthBook |
 | Auth | OAuth 2.0, JWT, macOS Keychain |
-
-## Notable Design Patterns
-
-### Parallel Prefetch
-
-Startup time is optimized by prefetching MDM settings, keychain reads, and API preconnect in parallel - before heavy module evaluation begins.
-
-```typescript
-// main.tsx - fired as side-effects before other imports
-startMdmRawRead()
-startKeychainPrefetch()
-```
-
-### Lazy Loading
-
-Heavy modules (OpenTelemetry ~400KB, gRPC ~700KB) are deferred via dynamic `import()` until actually needed.
-
-### Agent Swarms
-
-Sub-agents are spawned via AgentTool, with coordinator/ handling multi-agent orchestration. TeamCreateTool enables team-level parallel work.
-
-### Skill System
-
-Reusable workflows defined in skills/ and executed through SkillTool. Users can add custom skills.
-
-### Plugin Architecture
-
-Built-in and third-party plugins are loaded through the plugins/ subsystem.
-
-## GitPretty Setup (Per-File Pretty Commits)
-
-If you want GitHub's file UI to show visually distinct commit messages per file, use the helper script in this repo:
-
-```bash
-bash ./gitpretty-apply.sh .
-```
-
-This will:
-
-1. Clone gitpretty into ~/.gitpretty (first run only)
-2. Make scripts executable
-3. Run emoji-file-commits.sh against this repo
-
-Optional: install auto-emoji hooks for future commits:
-
-```bash
-bash ./gitpretty-apply.sh . --hooks
-```
-
-After running, push as usual:
-
-```bash
-git push origin main
-```
-
-## Use It in Claude Code (MCP Server)
-
-This repo includes an MCP server that lets you explore the Claude Code source directly from any Claude session. One command to set it up:
-
-### Quick Start
-
-```bash
-# Clone the repo (if you haven't already)
-git clone https://github.com/Atharvsinh-codez/claude-code.git
-cd claude-code/mcp-server
-
-# Install dependencies and build
-npm install && npm run build
-
-# Add to Claude Code (run from the repo root)
-claude mcp add claude-code-explorer -- node /absolute/path/to/claude-code/mcp-server/dist/index.js
-```
-
-Replace /absolute/path/to/claude-code with the actual path where you cloned the repo.
-
-Or as a single copy-paste block (clones, builds, and registers in one go):
-
-```bash
-git clone https://github.com/Atharvsinh-codez/claude-code.git ~/claude-code \
-  && cd ~/claude-code/mcp-server \
-  && npm install && npm run build \
-  && claude mcp add claude-code-explorer -- node ~/claude-code/mcp-server/dist/index.js
-```
-
-### What You Get
-
-Once added, Claude has access to these tools for exploring the codebase:
-
-| Tool | Description |
-|---|---|
-| list_tools | List all ~40 agent tools with source files |
-| list_commands | List all ~50 slash commands with source files |
-| get_tool_source | Read full source of any tool (e.g. BashTool, FileEditTool) |
-| get_command_source | Read source of any slash command (e.g. review, mcp) |
-| read_source_file | Read any file from src/ by path |
-| search_source | Grep across the entire source tree |
-| list_directory | Browse src/ directories |
-| get_architecture | High-level architecture overview |
-
-Plus prompts for guided exploration:
-
-- explain_tool - Deep-dive into how a specific tool works
-- explain_command - Understand a slash command's implementation
-- architecture_overview - Guided tour of the full architecture
-- how_does_it_work - Explain any subsystem (permissions, MCP, bridge, etc.)
-- compare_tools - Side-by-side comparison of two tools
-
-### Example Usage
-
-After adding the MCP server, just ask Claude naturally:
-
-"How does the BashTool work?"
-"Search for where permissions are checked"
-"Show me the /review command source"
-"Explain the MCP client integration"
-
-### Custom Source Path
-
-If your src/ directory is in a non-standard location, set the environment variable:
-
-```bash
-claude mcp add claude-code-explorer -e CLAUDE_CODE_SRC_ROOT=/path/to/src -- node /path/to/mcp-server/dist/index.js
-```
-
-### Remove It
-
-```bash
-claude mcp remove claude-code-explorer
-```
 
 ## Disclaimer
 
